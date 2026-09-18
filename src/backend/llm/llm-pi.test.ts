@@ -248,7 +248,7 @@ describe("pi-ai 请求适配", () => {
     expect(payload).not.toHaveProperty("thinking");
   });
 
-  it("SakuraLLM 发送 stream: false 且不进入 SSE 流式", async () => {
+  it("SakuraLLM 发送 stream: false 且不进入 SSE 流式并清理工具字段", async () => {
     const original_fetch = globalThis.fetch;
     let request_body: Record<string, unknown> = {};
     globalThis.fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
@@ -272,12 +272,19 @@ describe("pi-ai 请求适配", () => {
         api_url: "https://sakura-share.one/v1",
         model_id: "sakura-14b-qwen2.5-v1.0-iq4xs.gguf",
       });
+      request.context.tools = [
+        { name: "test_tool", description: "desc", parameters: Type.Object({}) },
+      ];
       const result = await request.stream(request.model, request.context, request.options).result();
 
       expect(request_body).toMatchObject({
         model: "sakura-14b-qwen2.5-v1.0-iq4xs.gguf",
         stream: false,
       });
+      expect(request_body).not.toHaveProperty("tools");
+      expect(request_body).not.toHaveProperty("tool_choice");
+      expect(request_body).not.toHaveProperty("store");
+      expect(request_body).not.toHaveProperty("stream_options");
       expect(result).toMatchObject({
         role: "assistant",
         content: [{ type: "text", text: "翻译结果" }],

@@ -274,6 +274,12 @@ function execute_sakura_one_shot_stream(
         }
       }
       payload["stream"] = false;
+      delete payload["tools"];
+      delete payload["tool_choice"];
+      delete payload["store"];
+      delete payload["stream_options"];
+      delete payload["prompt_cache_key"];
+      delete payload["prompt_cache_retention"];
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
