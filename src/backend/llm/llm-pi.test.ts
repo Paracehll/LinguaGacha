@@ -248,6 +248,73 @@ describe("pi-ai 请求适配", () => {
     expect(payload).not.toHaveProperty("thinking");
   });
 
+  it("SakuraLLM 发送 stream: false 且不进入 SSE 流式", async () => {
+    const original_fetch = globalThis.fetch;
+    let request_body: Record<string, unknown> = {};
+    globalThis.fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      request_body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: { content: "翻译结果" },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    try {
+      const request = resolve_request({
+        api_format: "SakuraLLM",
+        api_url: "https://sakura-share.one/v1",
+        model_id: "sakura-14b-qwen2.5-v1.0-iq4xs.gguf",
+      });
+      const result = await request.stream(request.model, request.context, request.options).result();
+
+      expect(request_body).toMatchObject({
+        model: "sakura-14b-qwen2.5-v1.0-iq4xs.gguf",
+        stream: false,
+      });
+      expect(result).toMatchObject({
+        role: "assistant",
+        content: [{ type: "text", text: "翻译结果" }],
+        usage: { input: 10, output: 5, totalTokens: 15 },
+        stopReason: "stop",
+      });
+    } finally {
+      globalThis.fetch = original_fetch;
+    }
+  });
+
+  it("SakuraLLM 在 HTTP 400 失败时返回对应格式的错误", async () => {
+    const original_fetch = globalThis.fetch;
+    globalThis.fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response("streaming not supported", {
+          status: 400,
+          headers: { "content-type": "text/plain" },
+        }),
+    );
+    try {
+      const request = resolve_request({
+        api_format: "SakuraLLM",
+        api_url: "https://sakura-share.one/v1",
+        model_id: "sakura-14b-qwen2.5-v1.0-iq4xs.gguf",
+      });
+      const result = await request.stream(request.model, request.context, request.options).result();
+
+      expect(result).toMatchObject({
+        stopReason: "error",
+        errorMessage: "400 status code (streaming not supported)",
+      });
+    } finally {
+      globalThis.fetch = original_fetch;
+    }
+  });
+
   it("非推理 Responses 由 Pi 生成 Items，且不注入 reasoning", async () => {
     const request = resolve_request({
       api_format: "OpenAIResponses",

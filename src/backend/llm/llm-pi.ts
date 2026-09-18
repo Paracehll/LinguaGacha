@@ -1,4 +1,6 @@
 import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
   type AssistantMessageEventStream,
   type Context,
   type Model as PiModel,
@@ -7,6 +9,7 @@ import {
   type ProviderStreams,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { record_http_response_status } from "../network/http-response-status";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -154,15 +157,18 @@ export function resolve_one_shot_pi_request(
     onPayload: (payload) => apply_one_shot_request_overrides(snapshot, payload, signal),
   };
   const stream: OneShotStream =
-    snapshot.api_format === "Google" || snapshot.api_format === "Anthropic"
+    snapshot.api_format === "SakuraLLM"
       ? (active_model, context, active_options) =>
-          resolved.streamSimple(
-            active_model,
-            context,
-            active_options as SimpleStreamOptions | undefined,
-          )
-      : (active_model, context, active_options) =>
-          resolved.stream(active_model, context, active_options);
+          execute_sakura_one_shot_stream(active_model, context, active_options)
+      : snapshot.api_format === "Google" || snapshot.api_format === "Anthropic"
+        ? (active_model, context, active_options) =>
+            resolved.streamSimple(
+              active_model,
+              context,
+              active_options as SimpleStreamOptions | undefined,
+            )
+        : (active_model, context, active_options) =>
+            resolved.stream(active_model, context, active_options);
   return {
     model,
     context: build_pi_context(snapshot, messages),
@@ -226,6 +232,183 @@ function build_pi_context(snapshot: ModelRequestSnapshot, messages: LLMMessage[]
     ...(system_prompt === "" ? {} : { systemPrompt: system_prompt }),
     messages: user_messages,
   };
+}
+
+/** SakuraLLM 使用非流式 HTTP POST 请求以兼容不支持 SSE 流式的 Sakura 接口。 */
+function execute_sakura_one_shot_stream(
+  model: PiModel<PiApi>,
+  context: Context,
+  options?: ProviderStreamOptions,
+): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+
+  (async () => {
+    try {
+      options?.signal?.throwIfAborted();
+
+      const messages: Array<{ role: string; content: string }> = [];
+      if (context.systemPrompt && context.systemPrompt.trim() !== "") {
+        messages.push({ role: "system", content: context.systemPrompt });
+      }
+      for (const msg of context.messages) {
+        messages.push({ role: msg.role, content: msg.content });
+      }
+
+      let payload: Record<string, unknown> = {
+        model: model.id,
+        messages,
+        stream: false,
+        ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+        ...(options?.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+      };
+
+      if (options?.onPayload) {
+        const next = await options.onPayload(payload, model);
+        if (next !== undefined && typeof next === "object" && next !== null) {
+          payload = next as Record<string, unknown>;
+        }
+      }
+      payload["stream"] = false;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      };
+      if (options?.apiKey && options.apiKey !== "no_key_required") {
+        headers["Authorization"] = `Bearer ${options.apiKey}`;
+      }
+
+      const baseUrl = model.baseUrl.replace(/\/+$/u, "");
+      const url = `${baseUrl}/chat/completions`;
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: options?.signal,
+      });
+
+      record_http_response_status(response.status);
+
+      if (!response.ok) {
+        const error_text = (await response.text()).trim();
+        const error_message = error_text
+          ? `${response.status} status code (${error_text})`
+          : `${response.status} status code (no body)`;
+        const errMessage: AssistantMessage = {
+          role: "assistant",
+          content: [],
+          api: "openai-completions",
+          provider: "openai-compatible",
+          model: model.id,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "error",
+          errorMessage: error_message,
+          timestamp: Date.now(),
+        };
+        stream.push({ type: "error", reason: "error", error: errMessage });
+        stream.end();
+        return;
+      }
+
+      const data = (await response.json()) as Record<string, unknown>;
+      const choices = Array.isArray(data["choices"]) ? data["choices"] : [];
+      const choice = (choices[0] ?? {}) as Record<string, unknown>;
+      const choice_message = (choice["message"] ?? {}) as Record<string, unknown>;
+      const text = String(choice_message["content"] ?? "");
+      const reasoning =
+        choice_message["reasoning_content"] ?? choice_message["thinking"] ?? undefined;
+
+      const content_blocks: AssistantMessage["content"] = [];
+      if (typeof reasoning === "string" && reasoning.trim() !== "") {
+        content_blocks.push({ type: "thinking", thinking: reasoning });
+      }
+      content_blocks.push({ type: "text", text });
+
+      const raw_usage = (data["usage"] ?? {}) as Record<string, unknown>;
+      const input_tokens = Number(raw_usage["prompt_tokens"] ?? 0);
+      const output_tokens = Number(raw_usage["completion_tokens"] ?? 0);
+      const total_tokens = Number(raw_usage["total_tokens"] ?? input_tokens + output_tokens);
+
+      const finish_reason = String(choice["finish_reason"] ?? "stop");
+      const stopReason = finish_reason === "length" ? "length" : "stop";
+
+      const assistantMsg: AssistantMessage = {
+        role: "assistant",
+        content: content_blocks,
+        api: "openai-completions",
+        provider: "openai-compatible",
+        model: model.id,
+        usage: {
+          input: Number.isFinite(input_tokens) ? input_tokens : 0,
+          output: Number.isFinite(output_tokens) ? output_tokens : 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: Number.isFinite(total_tokens) ? total_tokens : 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason,
+        timestamp: Date.now(),
+      };
+
+      await options?.onResponse?.({ status: response.status, headers: headers_to_record(response.headers) }, model);
+
+      stream.push({ type: "start", partial: assistantMsg });
+      if (text !== "") {
+        const text_index = content_blocks.findIndex((b) => b.type === "text");
+        const contentIndex = text_index >= 0 ? text_index : 0;
+        stream.push({ type: "text_start", contentIndex, partial: assistantMsg });
+        stream.push({ type: "text_delta", contentIndex, delta: text, partial: assistantMsg });
+        stream.push({ type: "text_end", contentIndex, content: text, partial: assistantMsg });
+      }
+      stream.push({ type: "done", reason: stopReason, message: assistantMsg });
+      stream.end();
+    } catch (error) {
+      const is_aborted = options?.signal?.aborted;
+      const error_message = error instanceof Error ? error.message : String(error);
+      const errMessage: AssistantMessage = {
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: "openai-compatible",
+        model: model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: is_aborted ? "aborted" : "error",
+        errorMessage: is_aborted ? "请求已取消。" : error_message,
+        timestamp: Date.now(),
+      };
+      stream.push({
+        type: "error",
+        reason: is_aborted ? "aborted" : "error",
+        error: errMessage,
+      });
+      stream.end();
+    }
+  })();
+
+  return stream;
+}
+
+function headers_to_record(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+  return result;
 }
 
 /** 空提示词在发起远端请求前按 API 格式语义转为稳定校验错误。 */

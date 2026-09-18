@@ -350,17 +350,28 @@ describe("LLMClient", () => {
   });
 
   it("Sakura 成功正文保留原始纯文本", async () => {
-    api_mocks.openai.mockImplementation(() =>
-      completed_stream(create_message({ content: [{ type: "text", text: " 第一行 \n 第二行 " }] })),
+    const original_fetch = globalThis.fetch;
+    globalThis.fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: " 第一行 \n 第二行 " }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
     );
-    const client = create_client();
+    try {
+      const client = create_client();
 
-    const result = await client.request(
-      create_body({ api_format: "SakuraLLM" }),
-      new AbortController().signal,
-    );
+      const result = await client.request(
+        create_body({ api_format: "SakuraLLM" }),
+        new AbortController().signal,
+      );
 
-    expect(result.response_result).toBe("第一行 \n 第二行");
+      expect(result.response_result).toBe("第一行 \n 第二行");
+    } finally {
+      globalThis.fetch = original_fetch;
+    }
   });
 });
 
