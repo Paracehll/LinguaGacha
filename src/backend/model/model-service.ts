@@ -589,23 +589,10 @@ export class ModelService {
   }
 
   /**
-   * 沿用既有 Python repr 日志形状，方便用户复核实际 messages。
+   * 格式化模型测试提示词消息为完整 JSON，方便调试与复核。
    */
   private format_model_test_messages_for_log(messages: LLMMessage[]): string {
-    const rows = messages.map(
-      (message) =>
-        `{'role': '${this.escape_python_repr(message.role)}', 'content': '${this.escape_python_repr(
-          message.content,
-        )}'}`,
-    );
-    return `[${rows.join(", ")}]`;
-  }
-
-  /**
-   * 只转义反斜杠和单引号，配合上方 repr 形状。
-   */
-  private escape_python_repr(value: string): string {
-    return value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+    return JSON.stringify(messages, null, 2);
   }
 
   /**

@@ -185,7 +185,12 @@ function resolve_pi_api(api_format: ModelRequestSnapshot["api_format"]): {
   streamSimple: ProviderStreams["streamSimple"];
 } {
   if (api_format === "SakuraLLM") {
-    return { provider: "openai-compatible", api: "openai-completions", ...openAICompletionsApi() };
+    return {
+      provider: "openai-compatible",
+      api: "openai-completions",
+      stream: execute_sakura_one_shot_stream,
+      streamSimple: execute_sakura_one_shot_stream,
+    };
   }
   if (api_format === "Anthropic") {
     return { provider: "anthropic", api: "anthropic-messages", ...anthropicMessagesApi() };
